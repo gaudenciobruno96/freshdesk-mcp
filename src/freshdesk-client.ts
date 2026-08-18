@@ -703,4 +703,38 @@ export class FreshdeskClient {
   async viewRole(roleId: number): Promise<Role> {
     return this.request<Role>('GET', `/roles/${roleId}`);
   }
+
+  // ==================== ATTACHMENTS ====================
+
+  /**
+   * Baixa o conteudo de um anexo ou de uma imagem inline do chamado.
+   *
+   * Duas origens, dois comportamentos:
+   *  - anexo formal: `attachment_url` da API, ja pre-assinada, funciona sem auth
+   *  - imagem inline (<img src>) no corpo do e-mail: costuma exigir o header de
+   *    autenticacao do helpdesk
+   *
+   * Tenta sem auth primeiro para nao vazar credencial para host de terceiro
+   * (as URLs pre-assinadas apontam para S3), e so manda o header se o dominio
+   * for do proprio Freshdesk.
+   */
+  async downloadAttachment(url: string): Promise<{ buffer: Buffer; contentType: string }> {
+    const isFreshdeskHost = /(^|\.)freshdesk\.com/i.test(new URL(url).hostname);
+
+    let response = await fetch(url);
+
+    if (!response.ok && isFreshdeskHost) {
+      response = await fetch(url, { headers: { Authorization: this.authHeader } });
+    }
+
+    if (!response.ok) {
+      throw new Error(`Falha ao baixar (${response.status} ${response.statusText}): ${url}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    return {
+      buffer: Buffer.from(arrayBuffer),
+      contentType: response.headers.get('content-type') || 'application/octet-stream',
+    };
+  }
 }

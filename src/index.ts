@@ -8,6 +8,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import {
   FreshdeskClient,
   type CreateTicketParams,
@@ -60,10 +62,45 @@ const SOURCE_MAP: Record<number, string> = {
 };
 
 // Helper formatters
-function formatTicket(ticket: Record<string, unknown>): string {
+/** Nome legivel de um agente ou contato. O Freshdesk devolve o nome do agente
+ *  aninhado em `contact`, nao na raiz - por isso o fallback. */
+function personLabel(p: Record<string, unknown> | undefined | null, id: unknown): string {
+  if (!p) return String(id ?? 'N/A');
+  const c = (p.contact as Record<string, unknown> | undefined) || p;
+  const name = (c.name as string) || (p.name as string);
+  const email = (c.email as string) || (p.email as string);
+  if (!name && !email) return String(id ?? 'N/A');
+  return `${name || '(sem nome)'}${email ? ` <${email}>` : ''}${id ? ` (id ${id})` : ''}`;
+}
+
+interface FormatTicketOptions {
+  requester?: Record<string, unknown> | null;
+  agent?: Record<string, unknown> | null;
+  agentNota?: string;
+  includeHtml?: boolean;
+}
+
+function formatTicket(ticket: Record<string, unknown>, opts: FormatTicketOptions = {}): string {
   const status = STATUS_MAP[ticket.status as number] || ticket.status;
   const priority = PRIORITY_MAP[ticket.priority as number] || ticket.priority;
   const source = SOURCE_MAP[ticket.source as number] || ticket.source;
+
+  const custom = ticket.custom_fields as Record<string, unknown> | undefined;
+  const customLines =
+    custom && Object.keys(custom).length > 0
+      ? '\nCustom fields:\n' +
+        Object.entries(custom)
+          .map(([k, v]) => `  ${k}: ${v === null || v === undefined ? '(vazio)' : v}`)
+          .join('\n')
+      : '';
+
+  const atts = ticket.attachments as Array<Record<string, unknown>> | undefined;
+  const attLines =
+    atts && atts.length > 0
+      ? `\nAttachments (${atts.length}):\n` +
+        atts.map((a) => `  [${a.id}] ${a.name} (${a.content_type}, ${a.size} bytes)`).join('\n') +
+        '\n  use get_ticket_attachments para as URLs e download_ticket_attachment para baixar'
+      : '';
 
   return `
 Ticket #${ticket.id}
@@ -71,13 +108,14 @@ Subject: ${ticket.subject}
 Status: ${status}
 Priority: ${priority}
 Source: ${source}
-Requester ID: ${ticket.requester_id}
-${ticket.responder_id ? `Assigned Agent ID: ${ticket.responder_id}` : 'Unassigned'}
+Requester: ${personLabel(opts.requester ?? (ticket.requester as Record<string, unknown>), ticket.requester_id)}
+${ticket.responder_id ? `Assigned Agent: ${personLabel(opts.agent, ticket.responder_id)}${opts.agentNota || ''}` : 'Unassigned'}
 ${ticket.group_id ? `Group ID: ${ticket.group_id}` : ''}
 Created: ${ticket.created_at}
 Updated: ${ticket.updated_at}
-${ticket.tags && (ticket.tags as string[]).length > 0 ? `Tags: ${(ticket.tags as string[]).join(', ')}` : ''}
+${ticket.tags && (ticket.tags as string[]).length > 0 ? `Tags: ${(ticket.tags as string[]).join(', ')}` : ''}${customLines}${attLines}
 ${ticket.description_text ? `\nDescription:\n${ticket.description_text}` : ''}
+${opts.includeHtml && ticket.description ? `\nDescription (HTML - contem as imagens inline):\n${ticket.description}` : ''}
 `.trim();
 }
 
@@ -200,15 +238,62 @@ server.tool(
 // 2. View Ticket
 server.tool(
   'view_ticket',
-  'View detailed information about a specific ticket.',
+  'View detailed information about a specific ticket. Resolve os nomes do solicitante e do agente responsavel, e mostra os campos customizados. Use include_html quando o texto vier truncado ou fizer referencia a algo "abaixo": as imagens do chamado sao inline no HTML e somem na versao em texto.',
   {
     ticket_id: z.number().describe('The ticket ID'),
     include: z.array(z.enum(['conversations', 'requester', 'company', 'stats'])).optional(),
+    include_html: z
+      .boolean()
+      .optional()
+      .describe('Inclui a description em HTML, onde ficam as tags <img> das imagens coladas no chamado'),
+    resolve_names: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe('Busca os nomes do solicitante e do agente responsavel em vez de mostrar so os IDs'),
   },
-  async ({ ticket_id, include }) => {
+  async ({ ticket_id, include, include_html, resolve_names }) => {
     try {
-      const ticket = await client.viewTicket(ticket_id, include);
-      return { content: [{ type: 'text', text: formatTicket(ticket as unknown as Record<string, unknown>) }] };
+      // O solicitante vem de graca pelo proprio include da API - e o unico
+      // caminho que funciona com conta de permissao restrita. viewContact da 404
+      // quando o solicitante e um agente, e viewAgent da 403 sem permissao.
+      const includes = new Set(include || []);
+      if (resolve_names !== false) includes.add('requester');
+
+      const ticket = (await client.viewTicket(
+        ticket_id,
+        includes.size > 0 ? (Array.from(includes) as Array<'conversations' | 'requester' | 'company' | 'stats'>) : undefined
+      )) as unknown as Record<string, unknown>;
+
+      const requester = (ticket.requester as Record<string, unknown>) || null;
+      let agent: Record<string, unknown> | null = null;
+      let agentNota = '';
+
+      if (resolve_names !== false && ticket.responder_id) {
+        try {
+          agent = (await client.viewAgent(ticket.responder_id as number)) as unknown as Record<string, unknown>;
+        } catch {
+          // 403 e o normal com permissao restrita. Se o responsavel for a propria
+          // conta, /agents/me resolve sem precisar de permissao sobre outros.
+          try {
+            const eu = (await client.getCurrentAgent()) as unknown as Record<string, unknown>;
+            if (eu && eu.id === ticket.responder_id) {
+              agent = eu;
+              agentNota = ' — voce';
+            } else {
+              agentNota = ' — sem permissao para resolver o nome';
+            }
+          } catch {
+            agentNota = ' — sem permissao para resolver o nome';
+          }
+        }
+      }
+
+      return {
+        content: [
+          { type: 'text', text: formatTicket(ticket, { requester, agent, agentNota, includeHtml: include_html }) },
+        ],
+      };
     } catch (error) {
       return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
     }
@@ -295,6 +380,12 @@ server.tool(
     group_id: z.number().optional(),
     responder_id: z.number().optional(),
     tags: z.array(z.string()).optional(),
+    custom_fields: z
+      .record(z.any())
+      .optional()
+      .describe(
+        'Campos customizados do helpdesk, com o prefixo cf_. Muitas contas exigem campos obrigatorios para mudar o status - se o update falhar com "Validation failed / missing_field", a mensagem de erro diz quais faltam. Ex: {"cf_prazo_estimado_n2":"2026-08-19","cf_prazo_estimado_n2_em_horas":4}'
+      ),
   },
   async ({ ticket_id, ...params }) => {
     try {
@@ -307,6 +398,7 @@ server.tool(
       if (params.group_id) updateParams.group_id = params.group_id;
       if (params.responder_id) updateParams.responder_id = params.responder_id;
       if (params.tags) updateParams.tags = params.tags;
+      if (params.custom_fields) updateParams.custom_fields = params.custom_fields;
 
       const ticket = await client.updateTicket(ticket_id, updateParams);
       return { content: [{ type: 'text', text: `Ticket updated!\n\n${formatTicket(ticket as unknown as Record<string, unknown>)}` }] };
@@ -1082,6 +1174,123 @@ server.tool(
       }
       const summary = roles.map(r => `#${r.id} | ${r.name} | Default: ${r.default} | ${r.description || ''}`).join('\n');
       return { content: [{ type: 'text', text: `Found ${roles.length} role(s):\n\n${summary}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
+  }
+);
+
+// ==================== ATTACHMENTS ====================
+
+/** Extrai as URLs de <img src="..."> de um trecho de HTML. */
+function extractInlineImages(html: string | undefined | null): string[] {
+  if (!html) return [];
+  const urls: string[] = [];
+  const re = /<img[^>]+src\s*=\s*["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    if (!m[1].startsWith('data:')) urls.push(m[1]);
+  }
+  return urls;
+}
+
+server.tool(
+  'get_ticket_attachments',
+  'Lista tudo que da para baixar de um chamado: anexos formais e as imagens coladas no corpo do e-mail (inline no HTML), incluindo as das conversas. Use quando o chamado mencionar print, imagem ou "conforme abaixo" e o texto vier truncado.',
+  {
+    ticket_id: z.number().describe('The ticket ID'),
+    include_conversations: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe('Procura tambem nas respostas e notas do chamado'),
+  },
+  async ({ ticket_id, include_conversations }) => {
+    try {
+      const ticket = (await client.viewTicket(ticket_id)) as unknown as Record<string, unknown>;
+      const linhas: string[] = [];
+      let n = 0;
+
+      const formais = (ticket.attachments as Array<Record<string, unknown>>) || [];
+      for (const a of formais) {
+        n++;
+        linhas.push(
+          `[${n}] ANEXO  ${a.name}\n     tipo: ${a.content_type} | ${a.size} bytes\n     url: ${a.attachment_url}`
+        );
+      }
+
+      for (const url of extractInlineImages(ticket.description as string)) {
+        n++;
+        linhas.push(`[${n}] INLINE (descricao do chamado)\n     url: ${url}`);
+      }
+
+      if (include_conversations !== false) {
+        const convs = (await client.listConversations(ticket_id)) as unknown as Array<Record<string, unknown>>;
+        for (const c of convs) {
+          const cAtts = (c.attachments as Array<Record<string, unknown>>) || [];
+          for (const a of cAtts) {
+            n++;
+            linhas.push(
+              `[${n}] ANEXO em conversa ${c.id}  ${a.name}\n     tipo: ${a.content_type} | ${a.size} bytes\n     url: ${a.attachment_url}`
+            );
+          }
+          for (const url of extractInlineImages(c.body as string)) {
+            n++;
+            linhas.push(`[${n}] INLINE (conversa ${c.id})\n     url: ${url}`);
+          }
+        }
+      }
+
+      if (n === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Nenhum anexo ou imagem inline no chamado #${ticket_id}.\n\nSe voce esperava encontrar algo, confira o chamado na interface: imagem colada como conteudo de e-mail as vezes fica em uma conversa, nao na descricao.`,
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `${n} item(ns) no chamado #${ticket_id}:\n\n${linhas.join('\n\n')}\n\nPara baixar: download_ticket_attachment com a url acima.`,
+          },
+        ],
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'download_ticket_attachment',
+  'Baixa um anexo ou imagem de chamado e salva em arquivo local, para que a imagem possa ser aberta e lida. Use a url devolvida por get_ticket_attachments.',
+  {
+    url: z.string().describe('URL do anexo ou da imagem, vinda de get_ticket_attachments'),
+    out_path: z
+      .string()
+      .describe('Caminho completo do arquivo de saida, incluindo a extensao. Ex: C:/temp/print-chamado-61726.png'),
+  },
+  async ({ url, out_path }) => {
+    try {
+      const { buffer, contentType } = await client.downloadAttachment(url);
+
+      const dir = path.dirname(out_path);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(out_path, buffer);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Salvo em ${out_path}\n  tipo: ${contentType}\n  tamanho: ${buffer.length} bytes\n\nAbra o arquivo para ver o conteudo.`,
+          },
+        ],
+      };
     } catch (error) {
       return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
     }
