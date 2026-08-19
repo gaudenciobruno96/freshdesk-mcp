@@ -76,88 +76,117 @@ npm run build
 }
 ```
 
-## Available Tools (41 Total)
+## Available Tools (48 total)
 
-### Ticket Operations (5 tools)
+Tools marked **★** are additions in this fork.
+
+### Tickets (5)
 | Tool | Description |
 |------|-------------|
 | `list_tickets` | List tickets with filters (status, priority, requester, date) |
-| `view_ticket` | View detailed ticket information |
+| `view_ticket` | View a ticket. **★** Resolves requester/agent names, shows custom fields, and `include_html` returns the raw HTML where inline images live |
 | `create_ticket` | Create a new support ticket |
 | `search_tickets` | Search tickets using Freshdesk query syntax |
-| `update_ticket` | Update ticket properties |
+| `update_ticket` | Update ticket properties. **★** Now accepts `custom_fields`, required by many helpdesks to change status |
 
-### Conversation Operations (3 tools)
+### Attachments ★ (2)
+| Tool | Description |
+|------|-------------|
+| `get_ticket_attachments` | **★** Lists formal attachments **and** images pasted inline in the email body, across the description and conversations |
+| `download_ticket_attachment` | **★** Downloads an attachment or inline image to a local file, so it can be opened and read |
+
+### Reporting ★ (5)
+For team leads: who is carrying what, and what has gone stale.
+
+| Tool | Description |
+|------|-------------|
+| `tickets_by_agent` | **★** Load distribution per agent, broken down by status. Includes the unassigned count |
+| `helpdesk_overview` | **★** Totals by status and priority, unassigned count, oldest open ticket |
+| `agent_workload` | **★** One agent's full list plus aggregates: by status, by priority, average age, how many are stale |
+| `stale_tickets` | **★** Tickets with no update in N days, oldest first, with who holds each |
+| `team_summary` | **★** Open and pending per group |
+
+Counting is cheap: the Freshdesk search endpoint returns a complete `total` on any page, so these tools read the count without paginating. Listing is capped at 300 results (30 per page × 10 pages) — when a list is truncated, the output says so rather than reporting a smaller number silently.
+
+**Restricted-permission accounts:** `list_agents` and `list_groups` return 403 for non-admin accounts. `tickets_by_agent` detects this and falls back to aggregating by `responder_id` from the tickets themselves — the numbers stay correct, agents show as IDs instead of names. `team_summary` requires admin and says so explicitly.
+
+### Conversations (3)
 | Tool | Description |
 |------|-------------|
 | `list_ticket_conversations` | Get all replies and notes for a ticket |
-| `reply_to_ticket` | Send a public reply (emails customer) |
-| `add_note_to_ticket` | Add private or public note |
+| `reply_to_ticket` | Send a public reply (emails the customer) |
+| `add_note_to_ticket` | Add a private or public note |
 
-### Contact Operations (5 tools)
+### Contacts (5)
 | Tool | Description |
 |------|-------------|
-| `list_contacts` | List all contacts with filters |
+| `list_contacts` | List contacts |
 | `view_contact` | View contact details |
-| `create_contact` | Create a new contact |
-| `update_contact` | Update contact information |
 | `search_contacts` | Search contacts |
+| `create_contact` | Create a contact |
+| `update_contact` | Update a contact |
 
-### Agent Operations (4 tools)
+### Agents (3)
 | Tool | Description |
 |------|-------------|
-| `list_agents` | List all agents |
-| `view_agent` | View agent details |
-| `get_current_agent` | Get authenticated agent info |
-| `list_groups` | List all agent groups |
-| `view_group` | View group details |
+| `list_agents` | List agents (admin only) |
+| `view_agent` | View an agent (admin only) |
+| `get_current_agent` | The authenticated agent — works without admin |
 
-### Company Operations (5 tools)
+### Groups (2)
 | Tool | Description |
 |------|-------------|
-| `list_companies` | List all companies |
+| `list_groups` | List groups (admin only) |
+| `view_group` | View a group |
+
+### Companies (5)
+| Tool | Description |
+|------|-------------|
+| `list_companies` | List companies |
 | `view_company` | View company details |
-| `create_company` | Create a new company |
-| `update_company` | Update company information |
+| `create_company` | Create a company |
+| `update_company` | Update a company |
 | `search_companies` | Search companies |
 
-### Time Tracking (3 tools)
+### Time Tracking (3)
 | Tool | Description |
 |------|-------------|
-| `list_time_entries` | List time entries for a ticket |
+| `list_time_entries` | List time entries |
 | `create_time_entry` | Log time on a ticket |
-| `toggle_timer` | Start/stop timer |
+| `toggle_timer` | Start/stop a timer |
 
-### Canned Responses (3 tools)
+### Canned Responses (3)
 | Tool | Description |
 |------|-------------|
-| `list_canned_response_folders` | List response folders |
+| `list_canned_response_folders` | List folders |
 | `list_canned_responses` | List responses in a folder |
-| `view_canned_response` | View response content |
+| `view_canned_response` | View a response |
 
-### Knowledge Base (5 tools)
+### Knowledge Base (5)
 | Tool | Description |
 |------|-------------|
-| `list_solution_categories` | List KB categories |
-| `list_solution_folders` | List folders in category |
-| `list_solution_articles` | List articles in folder |
-| `view_solution_article` | View article content |
-| `search_solutions` | Search knowledge base |
+| `list_solution_categories` | List categories |
+| `list_solution_folders` | List folders in a category |
+| `list_solution_articles` | List articles in a folder |
+| `view_solution_article` | View an article |
+| `search_solutions` | Search the knowledge base |
 
-### Satisfaction Ratings (2 tools)
+### Satisfaction Ratings (2)
 | Tool | Description |
 |------|-------------|
-| `list_ticket_satisfaction_ratings` | Ratings for a ticket |
+| `list_ticket_satisfaction_ratings` | Ratings for one ticket |
 | `list_all_satisfaction_ratings` | All ratings |
 
-### System Configuration (5 tools)
+### Configuration (5)
 | Tool | Description |
 |------|-------------|
-| `list_ticket_fields` | List custom ticket fields |
+| `list_ticket_fields` | Ticket fields, including the `cf_*` custom fields your account requires |
 | `list_products` | List products |
-| `list_business_hours` | List business hour configs |
+| `list_business_hours` | List business hours |
 | `list_sla_policies` | List SLA policies |
-| `list_roles` | List agent roles |
+| `list_roles` | List roles |
+
+> Tip: run `list_ticket_fields` once to discover which `cf_*` fields your helpdesk marks as required. Those are the ones `update_ticket` needs when changing status.
 
 ## Search Query Syntax
 
@@ -208,15 +237,41 @@ create_time_entry with ticket_id 12345, time_spent "01:30", note "Investigated i
 search_solutions with query "password reset"
 ```
 
+### This fork
+
+```
+# Close a ticket that requires custom fields
+update_ticket with ticket_id 61726, status "4",
+  custom_fields { "cf_estimated_deadline": "2026-08-19", "cf_estimated_hours": 4 }
+
+# Read a ticket whose text looks truncated — the rest is an inline image
+view_ticket with ticket_id 61726, include_html true
+
+# Find and download a screenshot pasted into the ticket
+get_ticket_attachments with ticket_id 61726
+download_ticket_attachment with url "<url from above>", out_path "C:/temp/print.png"
+
+# Who is carrying what
+tickets_by_agent
+
+# What has gone stale
+stale_tickets with days 30
+
+# One person's full load
+agent_workload with agent_id 101158193535
+```
+
 ## Development
 
 ```bash
-git clone https://github.com/NeuraLegion/freshdesk_mcp.git
-cd freshdesk_mcp
+git clone https://github.com/gaudenciobruno96/freshdesk-mcp.git
+cd freshdesk-mcp
 npm install
 npm run build
 npm start
 ```
+
+Upstream is [NeuraLegion/freshdesk_mcp](https://github.com/NeuraLegion/freshdesk_mcp) — pull their updates with `git fetch upstream && git merge upstream/main`.
 
 ## License
 

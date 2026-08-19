@@ -1297,6 +1297,351 @@ server.tool(
   }
 );
 
+// ==================== RELATORIOS / GESTAO ====================
+
+const STATUS_ABERTOS = [2, 3] as const;
+const TODOS_STATUS = [2, 3, 4, 5] as const;
+
+/** Conta sem paginar: o `total` do search ja vem completo na primeira pagina. */
+async function contar(query: string): Promise<number> {
+  const r = await client.searchTickets(query);
+  return r.total ?? 0;
+}
+
+/** Coleta ate `maxPaginas` do search (30 por pagina). Avisa se truncou. */
+async function coletar(
+  query: string,
+  maxPaginas = 10
+): Promise<{ tickets: Array<Record<string, unknown>>; total: number; truncado: boolean }> {
+  const tickets: Array<Record<string, unknown>> = [];
+  let total = 0;
+
+  for (let page = 1; page <= maxPaginas; page++) {
+    const r = await client.searchTicketsPage(query, page);
+    total = r.total ?? 0;
+    const lote = (r.results || []) as unknown as Array<Record<string, unknown>>;
+    tickets.push(...lote);
+    if (lote.length < 30) break;
+  }
+
+  return { tickets, total, truncado: tickets.length < total };
+}
+
+/**
+ * Mapa id -> nome de agente. Devolve null quando a conta nao tem permissao
+ * (403), e nesse caso os relatorios seguem mostrando o ID em vez do nome.
+ */
+async function mapaAgentes(): Promise<Map<number, string> | null> {
+  try {
+    const agentes = (await client.listAgents({ per_page: 100 })) as unknown as Array<Record<string, unknown>>;
+    const m = new Map<number, string>();
+    for (const a of agentes) {
+      const c = (a.contact as Record<string, unknown> | undefined) || a;
+      m.set(a.id as number, (c.name as string) || (c.email as string) || String(a.id));
+    }
+    return m;
+  } catch {
+    return null;
+  }
+}
+
+function nomeAgente(m: Map<number, string> | null, id: unknown): string {
+  if (id === null || id === undefined) return '(sem responsavel)';
+  return m?.get(id as number) || `id ${id}`;
+}
+
+function diasDesde(iso: unknown): number {
+  if (!iso) return 0;
+  return Math.floor((Date.now() - new Date(iso as string).getTime()) / 86400000);
+}
+
+server.tool(
+  'tickets_by_agent',
+  'Distribuicao da carga: quantos chamados cada agente tem, quebrado por status. Responde "quantos chamados estao na mao de cada um". Inclui a linha de chamados sem responsavel.',
+  {
+    status: z
+      .array(z.enum(['2', '3', '4', '5']))
+      .optional()
+      .describe('Status a contar. Padrao: 2 (Open) e 3 (Pending), que sao a carga real'),
+    group_id: z.number().optional().describe('Limita a um grupo'),
+  },
+  async ({ status, group_id }) => {
+    try {
+      const statusAlvo = (status || ['2', '3']).map(Number);
+      const agentes = await mapaAgentes();
+      const filtroGrupo = group_id ? ` AND group_id:${group_id}` : '';
+
+      const linhas: string[] = [];
+      let aviso = '';
+
+      if (agentes && agentes.size > 0) {
+        // Caminho preciso: uma contagem por agente/status, usando o `total`.
+        const dados: Array<{ nome: string; counts: number[]; total: number }> = [];
+        for (const [id, nome] of agentes) {
+          const counts: number[] = [];
+          for (const s of statusAlvo) counts.push(await contar(`agent_id:${id} AND status:${s}${filtroGrupo}`));
+          const total = counts.reduce((a, b) => a + b, 0);
+          if (total > 0) dados.push({ nome, counts, total });
+        }
+        dados.sort((a, b) => b.total - a.total);
+
+        const cab = ['Agente'.padEnd(32), ...statusAlvo.map((s) => (STATUS_MAP[s] || String(s)).padStart(9)), 'Total'.padStart(7)];
+        linhas.push(cab.join(''));
+        linhas.push('-'.repeat(cab.join('').length));
+        for (const d of dados) {
+          linhas.push([d.nome.slice(0, 31).padEnd(32), ...d.counts.map((c) => String(c).padStart(9)), String(d.total).padStart(7)].join(''));
+        }
+      } else {
+        // Sem permissao para listar agentes: agrega pelo responder_id dos proprios
+        // chamados. Numeros certos, nomes ausentes.
+        aviso =
+          '\nSem permissao para listar agentes (403) - agregado por ID a partir dos proprios chamados.\n';
+        const porAgente = new Map<string, number>();
+        let truncou = false;
+        for (const s of statusAlvo) {
+          const { tickets, truncado } = await coletar(`status:${s}${filtroGrupo}`);
+          truncou = truncou || truncado;
+          for (const t of tickets) {
+            const k = t.responder_id ? `id ${t.responder_id}` : '(sem responsavel)';
+            porAgente.set(k, (porAgente.get(k) || 0) + 1);
+          }
+        }
+        const ord = [...porAgente.entries()].sort((a, b) => b[1] - a[1]);
+        linhas.push('Agente'.padEnd(32) + 'Total'.padStart(7));
+        linhas.push('-'.repeat(39));
+        for (const [k, v] of ord) linhas.push(k.slice(0, 31).padEnd(32) + String(v).padStart(7));
+        if (truncou) aviso += 'ATENCAO: acima de 300 chamados por status a busca trunca - os numeros podem estar subestimados.\n';
+      }
+
+      const semResp = await contar(`agent_id:null${filtroGrupo}`).catch(() => -1);
+      const rodape = semResp >= 0 ? `\nSem responsavel (todos os status): ${semResp}` : '';
+
+      return { content: [{ type: 'text', text: `Distribuicao por agente${aviso}\n\n${linhas.join('\n')}${rodape}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'helpdesk_overview',
+  'Retrato geral do helpdesk: totais por status e por prioridade, quantos estao sem responsavel e qual o chamado aberto mais antigo. Responde "quantos chamados temos no total".',
+  {
+    group_id: z.number().optional().describe('Limita a um grupo'),
+  },
+  async ({ group_id }) => {
+    try {
+      const f = group_id ? ` AND group_id:${group_id}` : '';
+      const fSolo = group_id ? `group_id:${group_id}` : '';
+
+      const porStatus: string[] = [];
+      let totalGeral = 0;
+      for (const s of TODOS_STATUS) {
+        const n = await contar(fSolo ? `status:${s}${f}` : `status:${s}`);
+        totalGeral += n;
+        porStatus.push(`  ${(STATUS_MAP[s] || String(s)).padEnd(10)} ${String(n).padStart(6)}`);
+      }
+
+      const porPrioridade: string[] = [];
+      for (const p of [4, 3, 2, 1]) {
+        const n = await contar(fSolo ? `priority:${p}${f}` : `priority:${p}`);
+        porPrioridade.push(`  ${(PRIORITY_MAP[p] || String(p)).padEnd(10)} ${String(n).padStart(6)}`);
+      }
+
+      let abertos = 0;
+      for (const s of STATUS_ABERTOS) abertos += await contar(fSolo ? `status:${s}${f}` : `status:${s}`);
+
+      const semResp = await contar(fSolo ? `agent_id:null AND ${fSolo}` : 'agent_id:null').catch(() => -1);
+
+      // o mais antigo ainda aberto
+      let maisAntigo = '';
+      try {
+        const { tickets } = await coletar(fSolo ? `status:2 AND ${fSolo}` : 'status:2', 10);
+        if (tickets.length > 0) {
+          const velho = tickets.reduce((a, b) =>
+            new Date(a.created_at as string) < new Date(b.created_at as string) ? a : b
+          );
+          maisAntigo = `\nChamado aberto mais antigo: #${velho.id} - ${velho.subject} (${diasDesde(velho.created_at)} dias)`;
+        }
+      } catch { /* opcional */ }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Panorama do helpdesk${group_id ? ` (grupo ${group_id})` : ''}
+
+Por status:
+${porStatus.join('\n')}
+  ${'TOTAL'.padEnd(10)} ${String(totalGeral).padStart(6)}
+
+Por prioridade:
+${porPrioridade.join('\n')}
+
+Em aberto (Open + Pending): ${abertos}${semResp >= 0 ? `\nSem responsavel: ${semResp}` : ''}${maisAntigo}`,
+          },
+        ],
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'agent_workload',
+  'Overview completo dos chamados de um agente: a lista mais os agregados por status, prioridade e idade. Use quando quiser entender a carga de alguem, nao so contar.',
+  {
+    agent_id: z.number().describe('ID do agente. Use list_agents ou get_current_agent para descobrir'),
+    only_open: z.boolean().optional().default(true).describe('So Open e Pending. False traz todos os status'),
+  },
+  async ({ agent_id, only_open }) => {
+    try {
+      const q =
+        only_open !== false ? `agent_id:${agent_id} AND (status:2 OR status:3)` : `agent_id:${agent_id}`;
+      const { tickets, total, truncado } = await coletar(q);
+
+      if (tickets.length === 0) {
+        return { content: [{ type: 'text', text: `Nenhum chamado para o agente ${agent_id}${only_open !== false ? ' em aberto' : ''}.` }] };
+      }
+
+      const porStatus = new Map<string, number>();
+      const porPrioridade = new Map<string, number>();
+      for (const t of tickets) {
+        const s = STATUS_MAP[t.status as number] || String(t.status);
+        const p = PRIORITY_MAP[t.priority as number] || String(t.priority);
+        porStatus.set(s, (porStatus.get(s) || 0) + 1);
+        porPrioridade.set(p, (porPrioridade.get(p) || 0) + 1);
+      }
+
+      const idades = tickets.map((t) => diasDesde(t.created_at));
+      const media = Math.round(idades.reduce((a, b) => a + b, 0) / idades.length);
+
+      const ordenados = [...tickets].sort((a, b) => diasDesde(b.updated_at) - diasDesde(a.updated_at));
+      const lista = ordenados
+        .map(
+          (t) =>
+            `  #${t.id} [${PRIORITY_MAP[t.priority as number]}] ${String(t.subject).slice(0, 60)}\n     ${STATUS_MAP[t.status as number]} | aberto ha ${diasDesde(t.created_at)}d | sem atualizacao ha ${diasDesde(t.updated_at)}d`
+        )
+        .join('\n');
+
+      const parados = tickets.filter((t) => diasDesde(t.updated_at) > 7).length;
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Carga do agente ${agent_id}: ${total} chamado(s)${truncado ? ' (lista truncada em 300 pelo limite da busca)' : ''}
+
+Por status:     ${[...porStatus].map(([k, v]) => `${k}: ${v}`).join(' | ')}
+Por prioridade: ${[...porPrioridade].map(([k, v]) => `${k}: ${v}`).join(' | ')}
+Idade media:    ${media} dias
+Sem atualizacao ha mais de 7 dias: ${parados}
+
+Do mais parado para o mais recente:
+${lista}`,
+          },
+        ],
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'stale_tickets',
+  'Chamados que envelheceram: sem atualizacao ha mais de N dias, do mais parado para o menos. Mostra quem esta com cada um. Use para a revisao periodica da fila.',
+  {
+    days: z.number().optional().default(7).describe('Dias sem atualizacao. Padrao 7'),
+    only_open: z.boolean().optional().default(true).describe('So Open e Pending'),
+    group_id: z.number().optional(),
+  },
+  async ({ days, only_open, group_id }) => {
+    try {
+      const limite = new Date(Date.now() - (days || 7) * 86400000).toISOString().slice(0, 10);
+      const partes = [`updated_at:<'${limite}'`];
+      if (only_open !== false) partes.push('(status:2 OR status:3)');
+      if (group_id) partes.push(`group_id:${group_id}`);
+
+      const { tickets, total, truncado } = await coletar(partes.join(' AND '));
+
+      if (tickets.length === 0) {
+        return { content: [{ type: 'text', text: `Nenhum chamado parado ha mais de ${days || 7} dias. Fila em dia.` }] };
+      }
+
+      const agentes = await mapaAgentes();
+      const ordenados = [...tickets].sort((a, b) => diasDesde(b.updated_at) - diasDesde(a.updated_at));
+
+      const lista = ordenados
+        .map(
+          (t) =>
+            `  ${String(diasDesde(t.updated_at)).padStart(4)}d  #${t.id} [${PRIORITY_MAP[t.priority as number]}] ${String(t.subject).slice(0, 55)}\n        ${STATUS_MAP[t.status as number]} | ${nomeAgente(agentes, t.responder_id)}`
+        )
+        .join('\n');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `${total} chamado(s) sem atualizacao ha mais de ${days || 7} dias${truncado ? ' (lista truncada em 300)' : ''}\n\n  dias  chamado\n${lista}`,
+          },
+        ],
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'team_summary',
+  'Consolidado por grupo: quantos chamados abertos e pendentes cada grupo tem. Use quando o acompanhamento e por frente de trabalho, nao por pessoa.',
+  {},
+  async () => {
+    try {
+      let grupos: Array<Record<string, unknown>>;
+      try {
+        grupos = (await client.listGroups()) as unknown as Array<Record<string, unknown>>;
+      } catch {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'Sem permissao para listar grupos (403) - esta tool precisa de conta com acesso a administracao.\n\nAlternativa: se voce souber o group_id, use helpdesk_overview com group_id, que funciona com qualquer permissao.',
+            },
+          ],
+        };
+      }
+      if (!grupos || grupos.length === 0) {
+        return { content: [{ type: 'text', text: 'Nenhum grupo encontrado.' }] };
+      }
+
+      const linhas: string[] = [];
+      linhas.push('Grupo'.padEnd(38) + 'Open'.padStart(7) + 'Pending'.padStart(9) + 'Total'.padStart(7));
+      linhas.push('-'.repeat(61));
+
+      const dados: Array<{ nome: string; o: number; p: number }> = [];
+      for (const g of grupos) {
+        const o = await contar(`group_id:${g.id} AND status:2`);
+        const p = await contar(`group_id:${g.id} AND status:3`);
+        if (o + p > 0) dados.push({ nome: (g.name as string) || `id ${g.id}`, o, p });
+      }
+      dados.sort((a, b) => b.o + b.p - (a.o + a.p));
+
+      for (const d of dados) {
+        linhas.push(
+          d.nome.slice(0, 37).padEnd(38) + String(d.o).padStart(7) + String(d.p).padStart(9) + String(d.o + d.p).padStart(7)
+        );
+      }
+
+      return { content: [{ type: 'text', text: `Chamados em aberto por grupo\n\n${linhas.join('\n')}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+    }
+  }
+);
+
 // ==================== START SERVER ====================
 
 async function main() {

@@ -462,6 +462,19 @@ export class FreshdeskClient {
     );
   }
 
+  /**
+   * Uma pagina da busca. O `total` vem completo em qualquer pagina - por isso da
+   * para contar sem paginar. Ja os `results` param na pagina 10 (300 itens), que
+   * e o teto do search do Freshdesk.
+   */
+  async searchTicketsPage(query: string, page: number): Promise<{ results: Ticket[]; total: number }> {
+    const encodedQuery = encodeURIComponent(query);
+    return this.request<{ results: Ticket[]; total: number }>(
+      'GET',
+      `/search/tickets?query="${encodedQuery}"&page=${page}`
+    );
+  }
+
   async updateTicket(ticketId: number, params: Partial<CreateTicketParams>): Promise<Ticket> {
     return this.request<Ticket>('PUT', `/tickets/${ticketId}`, params);
   }
