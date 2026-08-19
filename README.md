@@ -1,8 +1,39 @@
 # Freshdesk MCP Server
 
-Developed and maintained by [Bright Security](https://brightsec.com).
+> **This is a fork** of [NeuraLegion/freshdesk_mcp](https://github.com/NeuraLegion/freshdesk_mcp), originally developed and maintained by [Bright Security](https://brightsec.com), MIT licensed. All the original work and credit is theirs — see the section below for what this fork adds.
 
-An MCP (Model Context Protocol) server for integrating with the Freshdesk API. Provides 41 tools for managing support tickets, contacts, companies, and more.
+An MCP (Model Context Protocol) server for integrating with the Freshdesk API. Provides tools for managing support tickets, contacts, companies, and more.
+
+## What this fork adds
+
+Three gaps that showed up while working real support tickets:
+
+### Custom fields on `update_ticket`
+
+Many helpdesks require custom fields to change a ticket's status. Without them the API rejects the call with `Validation failed / missing_field`, and there was no way to send them — the tool schema didn't expose `custom_fields`, even though the client already supported it.
+
+```
+update_ticket · ticket_id: 123 · status: "4"
+  custom_fields: { "cf_estimated_deadline": "2026-08-19", "cf_estimated_hours": 4 }
+```
+
+### `view_ticket` resolves names, shows custom fields, and can return HTML
+
+It used to print raw IDs (`Requester ID: 101056340013`) and read `description_text`, which **silently drops images pasted into the ticket body**. On a real ticket the text field held 200 characters while the HTML held 2979 — the missing part was a screenshot the requester had pasted inline.
+
+- **Requester name** resolved through the API's own `include=requester`. This matters on restricted-permission accounts: `viewContact` returns 404 when the requester is an agent, and `viewAgent` returns 403 without permission. The `include` works in both cases.
+- **Assigned agent** resolved when permission allows; when it doesn't, falls back to `/agents/me` to detect "it's you", and otherwise says so explicitly instead of showing a bare number.
+- **Custom fields** listed.
+- **`include_html`** returns the raw HTML description, where the `<img>` tags live.
+
+### Attachments — including inline images
+
+Two new tools:
+
+- **`get_ticket_attachments`** — finds both formal attachments and images pasted into the email body (`<img src>`), across the description *and* the conversations.
+- **`download_ticket_attachment`** — downloads to a local file, so the image can actually be opened and read.
+
+Downloads try unauthenticated first (attachment URLs are pre-signed and often point at S3) and only send the auth header when the host belongs to Freshdesk — so credentials never leak to a third-party host.
 
 > **Disclaimer:** This software is provided as-is by Bright Security. Use at your own risk. Bright Security makes no warranties regarding the reliability, accuracy, or completeness of this tool. You are solely responsible for how you use it and for any actions performed through the Freshdesk API. Always review tool actions before executing them in production environments.
 
