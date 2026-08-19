@@ -37,7 +37,8 @@ export interface CreateTicketParams {
   email?: string;
   requester_id?: number;
   priority?: 1 | 2 | 3 | 4;
-  status?: 2 | 3 | 4 | 5;
+  /** Nao e um enum fechado: o helpdesk pode definir status proprios (6, 7, 8...). */
+  status?: number;
   source?: number;
   type?: string;
   group_id?: number;

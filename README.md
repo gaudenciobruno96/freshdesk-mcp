@@ -17,6 +17,8 @@ update_ticket · ticket_id: 123 · status: "4"
   custom_fields: { "cf_estimated_deadline": "2026-08-19", "cf_estimated_hours": 4 }
 ```
 
+The API reports missing fields a few at a time, so fixing them one 400 at a time is a losing game — see the `list_ticket_fields` tip below for how to get the whole list up front.
+
 ### `view_ticket` resolves names, shows custom fields, and can return HTML
 
 It used to print raw IDs (`Requester ID: 101056340013`) and read `description_text`, which **silently drops images pasted into the ticket body**. On a real ticket the text field held 200 characters while the HTML held 2979 — the missing part was a screenshot the requester had pasted inline.
@@ -103,12 +105,16 @@ For team leads: who is carrying what, and what has gone stale.
 | `tickets_by_agent` | **★** Load distribution per agent, broken down by status. Includes the unassigned count |
 | `helpdesk_overview` | **★** Totals by status and priority, unassigned count, oldest open ticket |
 | `agent_workload` | **★** One agent's full list plus aggregates: by status, by priority, average age, how many are stale |
-| `stale_tickets` | **★** Tickets with no update in N days, oldest first, with who holds each |
+| `stale_tickets` | **★** Tickets with no update in N days, oldest first, with who holds each. `only_assigned` drops the never-assigned pile; `limit` caps the list (default 20) |
 | `team_summary` | **★** Open and pending per group |
 
-Counting is cheap: the Freshdesk search endpoint returns a complete `total` on any page, so these tools read the count without paginating. Listing is capped at 300 results (30 per page × 10 pages) — when a list is truncated, the output says so rather than reporting a smaller number silently.
+Counting is cheap: the Freshdesk search endpoint returns a complete `total` on any page, so these tools read the count without paginating. Listing is capped at 300 results (30 per page × 10 pages) — when a list is truncated, the output says so rather than reporting a smaller number silently. `stale_tickets` also says how many rows its `limit` held back, so a shortened list never reads as the whole list.
 
-**Restricted-permission accounts:** `list_agents` and `list_groups` return 403 for non-admin accounts. `tickets_by_agent` detects this and falls back to aggregating by `responder_id` from the tickets themselves — the numbers stay correct, agents show as IDs instead of names. `team_summary` requires admin and says so explicitly.
+**"Open" means everything that is not Resolved or Closed.** A Freshdesk account can define its own statuses beyond the documented 2–5 — *Em atendimento*, *Aguardando N2*, *Waiting on Third Party*. Counting only Open + Pending hides them, and they are precisely where work-in-progress sits: on the account this fork was built against, 9 of 106 open tickets lived in custom statuses, including the single oldest one (1310 days without an update, sitting in *Em atendimento*). `STATUS_MAP` carries the common names, an unknown status prints as its number instead of blank, and `update_ticket` accepts the full set — so a ticket can be moved *into* a custom status, not just out of one.
+
+Run `list_ticket_fields` and read the `choices` of the `status` field to see the ones your account defines.
+
+**Restricted-permission accounts:** `list_agents` and `list_groups` return 403 for non-admin accounts. `tickets_by_agent` aggregates from the tickets themselves either way, so the per-status columns are the same with or without admin — 403 only costs you the names, which fall back to IDs. `team_summary` requires admin and says so explicitly.
 
 ### Conversations (3)
 | Tool | Description |
@@ -186,7 +192,7 @@ Counting is cheap: the Freshdesk search endpoint returns a complete `total` on a
 | `list_sla_policies` | List SLA policies |
 | `list_roles` | List roles |
 
-> Tip: run `list_ticket_fields` once to discover which `cf_*` fields your helpdesk marks as required. Those are the ones `update_ticket` needs when changing status.
+> Tip: run `list_ticket_fields` once and look for `required_for_closure` — those are the fields `update_ticket` needs when changing status. Do this **before** the first attempt: the API validates in batches, so discovering them by trial means a run of 400s, each naming only part of what is missing. On the account this fork was built against, 11 fields are required to close a ticket.
 
 ## Search Query Syntax
 

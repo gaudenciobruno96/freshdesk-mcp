@@ -38,12 +38,28 @@ const client = new FreshdeskClient({
 });
 
 // Status and priority mappings
+/** Os quatro primeiros sao os do Freshdesk padrao; de 6 em diante sao status que
+ *  cada helpdesk cria por conta propria. Rode `list_ticket_fields` e olhe as
+ *  `choices` do campo `status` para ver os do seu - os nomes abaixo sao os mais
+ *  comuns, e um status desconhecido aparece como numero em vez de quebrar. */
 const STATUS_MAP: Record<number, string> = {
   2: 'Open',
   3: 'Pending',
   4: 'Resolved',
   5: 'Closed',
+  6: 'Esperando pelo cliente',
+  7: 'Esperando por terceiros',
+  8: 'Em atendimento',
+  9: 'Aguardando N2',
+  10: 'Responder ao cliente',
+  11: 'Aguardando N1',
+  12: 'Aguardando Negocios',
+  9000: 'Assigned to AI Agent',
 };
+
+/** Valores aceitos onde o status entra como parametro. String porque o MCP
+ *  transporta enum como texto. */
+const STATUS_VALORES = ['2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '9000'] as const;
 
 const PRIORITY_MAP: Record<number, string> = {
   1: 'Low',
@@ -135,15 +151,32 @@ ${contact.description ? `\nDescription:\n${contact.description}` : ''}
 `.trim();
 }
 
+/** Dados pessoais do agente (nome, e-mail, telefone, cargo, ativo) vem dentro de
+ *  `contact`, nao na raiz - mesmo motivo do fallback em personLabel. Ja `id`,
+ *  `available` e `group_ids` ficam na raiz e nao passam por aqui. */
+function agentPessoa(agent: Record<string, unknown>): Record<string, unknown> {
+  const c = (agent.contact as Record<string, unknown> | undefined) || {};
+  const pega = (k: string) => c[k] ?? agent[k];
+  return {
+    name: pega('name'),
+    email: pega('email'),
+    phone: pega('phone'),
+    mobile: pega('mobile'),
+    active: pega('active'),
+    job_title: pega('job_title'),
+  };
+}
+
 function formatAgent(agent: Record<string, unknown>): string {
+  const p = agentPessoa(agent);
   return `
 Agent #${agent.id}
-Name: ${agent.name}
-Email: ${agent.email}
-Phone: ${agent.phone || 'N/A'}
-Active: ${agent.active}
+Name: ${p.name || 'N/A'}
+Email: ${p.email || 'N/A'}
+Phone: ${p.phone || p.mobile || 'N/A'}
+Active: ${p.active}
 Available: ${agent.available}
-Job Title: ${agent.job_title || 'N/A'}
+Job Title: ${p.job_title || 'N/A'}
 Groups: ${(agent.group_ids as number[])?.join(', ') || 'None'}
 Created: ${agent.created_at}
 `.trim();
@@ -310,7 +343,7 @@ server.tool(
     email: z.string().optional().describe('Requester email'),
     requester_id: z.number().optional().describe('Existing requester ID'),
     priority: z.enum(['1', '2', '3', '4']).optional().describe('1=Low, 2=Medium, 3=High, 4=Urgent'),
-    status: z.enum(['2', '3', '4', '5']).optional().describe('2=Open, 3=Pending, 4=Resolved, 5=Closed'),
+    status: z.enum(STATUS_VALORES).optional().describe('2=Open, 3=Pending, 4=Resolved, 5=Closed. De 6 em diante sao status customizados do helpdesk - rode list_ticket_fields para ver os do seu'),
     type: z.string().optional().describe('Ticket type'),
     group_id: z.number().optional(),
     responder_id: z.number().optional(),
@@ -327,7 +360,7 @@ server.tool(
         email: params.email,
         requester_id: params.requester_id,
         priority: params.priority ? parseInt(params.priority) as 1 | 2 | 3 | 4 : undefined,
-        status: params.status ? parseInt(params.status) as 2 | 3 | 4 | 5 : undefined,
+        status: params.status ? parseInt(params.status) : undefined,
         type: params.type,
         group_id: params.group_id,
         responder_id: params.responder_id,
@@ -375,7 +408,7 @@ server.tool(
     subject: z.string().optional(),
     description: z.string().optional(),
     priority: z.enum(['1', '2', '3', '4']).optional(),
-    status: z.enum(['2', '3', '4', '5']).optional(),
+    status: z.enum(STATUS_VALORES).optional().describe('2=Open, 3=Pending, 4=Resolved, 5=Closed, e os customizados do helpdesk de 6 em diante'),
     type: z.string().optional(),
     group_id: z.number().optional(),
     responder_id: z.number().optional(),
@@ -393,7 +426,7 @@ server.tool(
       if (params.subject) updateParams.subject = params.subject;
       if (params.description) updateParams.description = params.description;
       if (params.priority) updateParams.priority = parseInt(params.priority) as 1 | 2 | 3 | 4;
-      if (params.status) updateParams.status = parseInt(params.status) as 2 | 3 | 4 | 5;
+      if (params.status) updateParams.status = parseInt(params.status);
       if (params.type) updateParams.type = params.type;
       if (params.group_id) updateParams.group_id = params.group_id;
       if (params.responder_id) updateParams.responder_id = params.responder_id;
@@ -620,7 +653,10 @@ server.tool(
       if (agents.length === 0) {
         return { content: [{ type: 'text', text: 'No agents found.' }] };
       }
-      const summary = agents.map(a => `#${a.id} | ${a.name} | ${a.email} | Active: ${a.active} | Available: ${a.available}`).join('\n');
+      const summary = agents.map(a => {
+        const p = agentPessoa(a as unknown as Record<string, unknown>);
+        return `#${a.id} | ${p.name || 'N/A'} | ${p.email || 'N/A'} | Active: ${p.active} | Available: ${a.available}`;
+      }).join('\n');
       return { content: [{ type: 'text', text: `Found ${agents.length} agent(s):\n\n${summary}` }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
@@ -1299,8 +1335,16 @@ server.tool(
 
 // ==================== RELATORIOS / GESTAO ====================
 
-const STATUS_ABERTOS = [2, 3] as const;
-const TODOS_STATUS = [2, 3, 4, 5] as const;
+/** "Aberto" e tudo que nao foi Resolved nem Closed. Contar so Open+Pending
+ *  esconde os status customizados - num helpdesk real e ali que mora o trabalho
+ *  em curso ("Em atendimento", "Aguardando N2"). */
+const TODOS_STATUS = Object.keys(STATUS_MAP).map(Number).sort((a, b) => a - b);
+const STATUS_ABERTOS = TODOS_STATUS.filter((s) => s !== 4 && s !== 5);
+
+/** Filtro de busca para "em aberto", como um OR unico - uma query em vez de N. */
+function filtroAbertos(): string {
+  return `(${STATUS_ABERTOS.map((s) => `status:${s}`).join(' OR ')})`;
+}
 
 /** Conta sem paginar: o `total` do search ja vem completo na primeira pagina. */
 async function contar(query: string): Promise<number> {
@@ -1360,61 +1404,73 @@ server.tool(
   'Distribuicao da carga: quantos chamados cada agente tem, quebrado por status. Responde "quantos chamados estao na mao de cada um". Inclui a linha de chamados sem responsavel.',
   {
     status: z
-      .array(z.enum(['2', '3', '4', '5']))
+      .array(z.enum(STATUS_VALORES))
       .optional()
-      .describe('Status a contar. Padrao: 2 (Open) e 3 (Pending), que sao a carga real'),
+      .describe('Status a contar. Padrao: tudo que nao e Resolved nem Closed - inclui os status customizados do helpdesk, onde costuma estar o trabalho em curso'),
     group_id: z.number().optional().describe('Limita a um grupo'),
   },
   async ({ status, group_id }) => {
     try {
-      const statusAlvo = (status || ['2', '3']).map(Number);
-      const agentes = await mapaAgentes();
+      const statusAlvo = (status || STATUS_ABERTOS.map(String)).map(Number);
       const filtroGrupo = group_id ? ` AND group_id:${group_id}` : '';
+      const filtroStatus = `(${statusAlvo.map((s) => `status:${s}`).join(' OR ')})`;
 
-      const linhas: string[] = [];
-      let aviso = '';
+      // Uma busca paginada em vez de uma contagem por agente/status: o cruzamento
+      // agente x status sai da propria lista, e o caminho sem admin passa a ter as
+      // mesmas colunas do caminho com admin - so muda o nome virar ID.
+      const { tickets, total, truncado } = await coletar(`${filtroStatus}${filtroGrupo}`);
 
-      if (agentes && agentes.size > 0) {
-        // Caminho preciso: uma contagem por agente/status, usando o `total`.
-        const dados: Array<{ nome: string; counts: number[]; total: number }> = [];
-        for (const [id, nome] of agentes) {
-          const counts: number[] = [];
-          for (const s of statusAlvo) counts.push(await contar(`agent_id:${id} AND status:${s}${filtroGrupo}`));
-          const total = counts.reduce((a, b) => a + b, 0);
-          if (total > 0) dados.push({ nome, counts, total });
-        }
-        dados.sort((a, b) => b.total - a.total);
-
-        const cab = ['Agente'.padEnd(32), ...statusAlvo.map((s) => (STATUS_MAP[s] || String(s)).padStart(9)), 'Total'.padStart(7)];
-        linhas.push(cab.join(''));
-        linhas.push('-'.repeat(cab.join('').length));
-        for (const d of dados) {
-          linhas.push([d.nome.slice(0, 31).padEnd(32), ...d.counts.map((c) => String(c).padStart(9)), String(d.total).padStart(7)].join(''));
-        }
-      } else {
-        // Sem permissao para listar agentes: agrega pelo responder_id dos proprios
-        // chamados. Numeros certos, nomes ausentes.
-        aviso =
-          '\nSem permissao para listar agentes (403) - agregado por ID a partir dos proprios chamados.\n';
-        const porAgente = new Map<string, number>();
-        let truncou = false;
-        for (const s of statusAlvo) {
-          const { tickets, truncado } = await coletar(`status:${s}${filtroGrupo}`);
-          truncou = truncou || truncado;
-          for (const t of tickets) {
-            const k = t.responder_id ? `id ${t.responder_id}` : '(sem responsavel)';
-            porAgente.set(k, (porAgente.get(k) || 0) + 1);
-          }
-        }
-        const ord = [...porAgente.entries()].sort((a, b) => b[1] - a[1]);
-        linhas.push('Agente'.padEnd(32) + 'Total'.padStart(7));
-        linhas.push('-'.repeat(39));
-        for (const [k, v] of ord) linhas.push(k.slice(0, 31).padEnd(32) + String(v).padStart(7));
-        if (truncou) aviso += 'ATENCAO: acima de 300 chamados por status a busca trunca - os numeros podem estar subestimados.\n';
+      if (tickets.length === 0) {
+        return { content: [{ type: 'text', text: 'Nenhum chamado nos status pedidos.' }] };
       }
 
-      const semResp = await contar(`agent_id:null${filtroGrupo}`).catch(() => -1);
-      const rodape = semResp >= 0 ? `\nSem responsavel (todos os status): ${semResp}` : '';
+      const agentes = await mapaAgentes();
+      const aviso = agentes
+        ? ''
+        : '\nSem permissao para listar agentes (403) - os agentes aparecem por ID.\n';
+
+      // agente -> status -> quantidade
+      const porAgente = new Map<string, Map<number, number>>();
+      for (const t of tickets) {
+        const k = nomeAgente(agentes, t.responder_id);
+        if (!porAgente.has(k)) porAgente.set(k, new Map());
+        const m = porAgente.get(k) as Map<number, number>;
+        const s = t.status as number;
+        m.set(s, (m.get(s) || 0) + 1);
+      }
+
+      // So as colunas que tem algum chamado, senao a tabela vira deserto de zeros.
+      const colunas = statusAlvo.filter((s) => [...porAgente.values()].some((m) => m.get(s)));
+      const larguras = colunas.map((s) => Math.max((STATUS_MAP[s] || String(s)).length, 5) + 2);
+
+      const dados = [...porAgente.entries()]
+        .map(([nome, m]) => ({
+          nome,
+          counts: colunas.map((s) => m.get(s) || 0),
+          total: [...m.values()].reduce((a, b) => a + b, 0),
+        }))
+        .sort((a, b) => b.total - a.total);
+
+      const cab =
+        'Agente'.padEnd(32) +
+        colunas.map((s, i) => (STATUS_MAP[s] || String(s)).padStart(larguras[i])).join('') +
+        'Total'.padStart(7);
+
+      const linhas = [cab, '-'.repeat(cab.length)];
+      for (const d of dados) {
+        linhas.push(
+          d.nome.slice(0, 31).padEnd(32) +
+            d.counts.map((c, i) => String(c).padStart(larguras[i])).join('') +
+            String(d.total).padStart(7)
+        );
+      }
+
+      // A linha "(sem responsavel)" ja esta na tabela, no mesmo recorte de status.
+      // Nao repetir aqui um total de todos os status: dois numeros com o mesmo
+      // rotulo e um convite a ler o errado.
+      const rodape =
+        `\n\nTotal nos status pedidos: ${total}` +
+        (truncado ? '\nATENCAO: a busca trunca em 300 - os numeros acima podem estar subestimados.' : '');
 
       return { content: [{ type: 'text', text: `Distribuicao por agente${aviso}\n\n${linhas.join('\n')}${rodape}` }] };
     } catch (error) {
@@ -1434,29 +1490,38 @@ server.tool(
       const f = group_id ? ` AND group_id:${group_id}` : '';
       const fSolo = group_id ? `group_id:${group_id}` : '';
 
-      const porStatus: string[] = [];
-      let totalGeral = 0;
+      // Contagem por status, uma vez so - "em aberto" sai desta mesma conta em vez
+      // de refazer as buscas.
+      const contagem = new Map<number, number>();
       for (const s of TODOS_STATUS) {
-        const n = await contar(fSolo ? `status:${s}${f}` : `status:${s}`);
-        totalGeral += n;
-        porStatus.push(`  ${(STATUS_MAP[s] || String(s)).padEnd(10)} ${String(n).padStart(6)}`);
+        contagem.set(s, await contar(fSolo ? `status:${s}${f}` : `status:${s}`));
       }
+      const totalGeral = [...contagem.values()].reduce((a, b) => a + b, 0);
+      const abertos = STATUS_ABERTOS.reduce((soma, s) => soma + (contagem.get(s) || 0), 0);
+
+      // Status customizado zerado nao merece uma linha; os quatro padrao ficam
+      // sempre, mesmo em zero, porque a ausencia deles e informacao.
+      const rotulo = Math.max(...TODOS_STATUS.map((s) => (STATUS_MAP[s] || String(s)).length));
+      const porStatus = TODOS_STATUS.filter((s) => s <= 5 || (contagem.get(s) || 0) > 0).map(
+        (s) => `  ${(STATUS_MAP[s] || String(s)).padEnd(rotulo)} ${String(contagem.get(s) || 0).padStart(6)}`
+      );
 
       const porPrioridade: string[] = [];
       for (const p of [4, 3, 2, 1]) {
         const n = await contar(fSolo ? `priority:${p}${f}` : `priority:${p}`);
-        porPrioridade.push(`  ${(PRIORITY_MAP[p] || String(p)).padEnd(10)} ${String(n).padStart(6)}`);
+        porPrioridade.push(`  ${(PRIORITY_MAP[p] || String(p)).padEnd(rotulo)} ${String(n).padStart(6)}`);
       }
 
-      let abertos = 0;
-      for (const s of STATUS_ABERTOS) abertos += await contar(fSolo ? `status:${s}${f}` : `status:${s}`);
-
-      const semResp = await contar(fSolo ? `agent_id:null AND ${fSolo}` : 'agent_id:null').catch(() => -1);
+      // Sem responsavel so faz sentido no que ainda esta aberto: contando todos os
+      // status, o numero e dominado por chamado fechado ha anos e nao serve para agir.
+      const semResp = await contar(
+        fSolo ? `agent_id:null AND ${filtroAbertos()} AND ${fSolo}` : `agent_id:null AND ${filtroAbertos()}`
+      ).catch(() => -1);
 
       // o mais antigo ainda aberto
       let maisAntigo = '';
       try {
-        const { tickets } = await coletar(fSolo ? `status:2 AND ${fSolo}` : 'status:2', 10);
+        const { tickets } = await coletar(fSolo ? `${filtroAbertos()} AND ${fSolo}` : filtroAbertos(), 10);
         if (tickets.length > 0) {
           const velho = tickets.reduce((a, b) =>
             new Date(a.created_at as string) < new Date(b.created_at as string) ? a : b
@@ -1473,12 +1538,12 @@ server.tool(
 
 Por status:
 ${porStatus.join('\n')}
-  ${'TOTAL'.padEnd(10)} ${String(totalGeral).padStart(6)}
+  ${'TOTAL'.padEnd(rotulo)} ${String(totalGeral).padStart(6)}
 
 Por prioridade:
 ${porPrioridade.join('\n')}
 
-Em aberto (Open + Pending): ${abertos}${semResp >= 0 ? `\nSem responsavel: ${semResp}` : ''}${maisAntigo}`,
+Em aberto (tudo menos Resolved/Closed): ${abertos}${semResp >= 0 ? `\nSem responsavel, em aberto: ${semResp}` : ''}${maisAntigo}`,
           },
         ],
       };
@@ -1493,12 +1558,12 @@ server.tool(
   'Overview completo dos chamados de um agente: a lista mais os agregados por status, prioridade e idade. Use quando quiser entender a carga de alguem, nao so contar.',
   {
     agent_id: z.number().describe('ID do agente. Use list_agents ou get_current_agent para descobrir'),
-    only_open: z.boolean().optional().default(true).describe('So Open e Pending. False traz todos os status'),
+    only_open: z.boolean().optional().default(true).describe('So o que nao esta Resolved/Closed. False traz todos os status'),
   },
   async ({ agent_id, only_open }) => {
     try {
       const q =
-        only_open !== false ? `agent_id:${agent_id} AND (status:2 OR status:3)` : `agent_id:${agent_id}`;
+        only_open !== false ? `agent_id:${agent_id} AND ${filtroAbertos()}` : `agent_id:${agent_id}`;
       const { tickets, total, truncado } = await coletar(q);
 
       if (tickets.length === 0) {
@@ -1554,37 +1619,61 @@ server.tool(
   'Chamados que envelheceram: sem atualizacao ha mais de N dias, do mais parado para o menos. Mostra quem esta com cada um. Use para a revisao periodica da fila.',
   {
     days: z.number().optional().default(7).describe('Dias sem atualizacao. Padrao 7'),
-    only_open: z.boolean().optional().default(true).describe('So Open e Pending'),
+    only_open: z.boolean().optional().default(true).describe('So o que nao esta Resolved/Closed'),
+    only_assigned: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('So os que tem responsavel. Use na revisao de fila: sem isso a lista costuma ser dominada por chamado antigo que nunca foi atribuido'),
+    limit: z
+      .number()
+      .optional()
+      .default(20)
+      .describe('Quantos exibir, do mais parado para o menos. Padrao 20. O total continua sendo reportado por inteiro'),
     group_id: z.number().optional(),
   },
-  async ({ days, only_open, group_id }) => {
+  async ({ days, only_open, only_assigned, group_id, limit }) => {
     try {
-      const limite = new Date(Date.now() - (days || 7) * 86400000).toISOString().slice(0, 10);
+      const dias = days || 7;
+      const teto = limit && limit > 0 ? limit : 20;
+      const limite = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
       const partes = [`updated_at:<'${limite}'`];
-      if (only_open !== false) partes.push('(status:2 OR status:3)');
+      if (only_open !== false) partes.push(filtroAbertos());
       if (group_id) partes.push(`group_id:${group_id}`);
 
-      const { tickets, total, truncado } = await coletar(partes.join(' AND '));
+      const busca = await coletar(partes.join(' AND '));
+      const truncado = busca.truncado;
+      // A busca do Freshdesk aceita `agent_id:null`, mas nao tem o inverso
+      // (`agent_id:*` volta 400), entao "so com responsavel" se resolve na lista.
+      const tickets = only_assigned ? busca.tickets.filter((t) => t.responder_id) : busca.tickets;
+      const total = only_assigned ? tickets.length : busca.total;
 
       if (tickets.length === 0) {
-        return { content: [{ type: 'text', text: `Nenhum chamado parado ha mais de ${days || 7} dias. Fila em dia.` }] };
+        return { content: [{ type: 'text', text: `Nenhum chamado parado ha mais de ${dias} dias${only_assigned ? ' com responsavel' : ''}. Fila em dia.` }] };
       }
 
       const agentes = await mapaAgentes();
       const ordenados = [...tickets].sort((a, b) => diasDesde(b.updated_at) - diasDesde(a.updated_at));
+      const exibidos = ordenados.slice(0, teto);
 
-      const lista = ordenados
+      const lista = exibidos
         .map(
           (t) =>
-            `  ${String(diasDesde(t.updated_at)).padStart(4)}d  #${t.id} [${PRIORITY_MAP[t.priority as number]}] ${String(t.subject).slice(0, 55)}\n        ${STATUS_MAP[t.status as number]} | ${nomeAgente(agentes, t.responder_id)}`
+            `  ${String(diasDesde(t.updated_at)).padStart(4)}d  #${t.id} [${PRIORITY_MAP[t.priority as number]}] ${String(t.subject).slice(0, 55)}\n        ${STATUS_MAP[t.status as number] || t.status} | ${nomeAgente(agentes, t.responder_id)}`
         )
         .join('\n');
+
+      // Dizer o que ficou de fora: uma lista cortada em silencio le-se como a lista inteira.
+      const corte =
+        ordenados.length > exibidos.length
+          ? `\n\n  ... e mais ${ordenados.length - exibidos.length} - aumente o limit para ver o resto`
+          : '';
 
       return {
         content: [
           {
             type: 'text',
-            text: `${total} chamado(s) sem atualizacao ha mais de ${days || 7} dias${truncado ? ' (lista truncada em 300)' : ''}\n\n  dias  chamado\n${lista}`,
+            text: `${total} chamado(s) sem atualizacao ha mais de ${dias} dias${only_assigned ? ', com responsavel' : ''}${truncado ? ' (busca truncada em 300)' : ''}\n\n  dias  chamado\n${lista}${corte}`,
           },
         ],
       };
